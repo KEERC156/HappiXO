@@ -380,8 +380,7 @@ function App() {
         return
       }
       if (authEvent === 'SIGNED_IN') setAuthMode('login')
-      if (session?.user) setPage((current) => current === 'auth' ? 'events' : current)
-      else if (isSupabaseConfigured) setPage((current) => current === 'dashboard' || current === 'events' ? 'auth' : current)
+      if (!session?.user && isSupabaseConfigured) setPage((current) => current === 'dashboard' || current === 'events' ? 'auth' : current)
     })
     void supabase.auth.getSession().then(({ data, error }) => {
       if (!active) return
@@ -942,7 +941,14 @@ function App() {
           </motion.div>
         ) : page === 'auth' ? (
           <motion.div key="auth" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-            <AuthPage initialMode={authMode} onBack={() => setPage('landing')} onAuthenticated={() => setPage('events')} />
+            <AuthPage
+              initialMode={authMode}
+              onBack={() => setPage('landing')}
+              onAuthenticated={(successMessage) => {
+                setPage('events')
+                if (successMessage) setToast(successMessage)
+              }}
+            />
           </motion.div>
         ) : page === 'events' ? (
           <motion.div key="events" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>

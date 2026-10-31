@@ -6,7 +6,7 @@ type AuthMode = 'login' | 'register' | 'reset' | 'update'
 
 export default function AuthPage({ onBack, onAuthenticated, initialMode = 'login' }: {
   onBack: () => void
-  onAuthenticated: () => void
+  onAuthenticated: (successMessage?: string) => void
   initialMode?: AuthMode
 }) {
   const [mode, setMode] = useState<AuthMode>(initialMode)
@@ -38,8 +38,24 @@ export default function AuthPage({ onBack, onAuthenticated, initialMode = 'login
           },
         })
         if (signUpError) throw signUpError
-        if (data.session) onAuthenticated()
-        else setMessage('Check your email to confirm your account, then come back to sign in.')
+        const session = data.session ?? (await supabase.auth.getSession()).data.session
+        if (!session) {
+          setMessage('Your account was created, but Supabase did not return an authenticated session. Check the email confirmation setting, then sign in.')
+          return
+        }
+        if (!data.user || session.user.id !== data.user.id) {
+          throw new Error('Supabase returned a session that does not match the newly registered customer.')
+        }
+        const { data: profile, error: profileError } = await supabase.from('profiles')
+          .update({ full_name: name.trim(), phone: phone.trim() || null })
+          .eq('id', session.user.id)
+          .select('id, full_name, email, phone')
+          .single()
+        if (profileError) throw profileError
+        if (profile.id !== session.user.id || profile.full_name !== name.trim() || profile.email !== session.user.email || profile.phone !== (phone.trim() || null)) {
+          throw new Error('Your account was created, but the saved customer profile did not match the submitted details.')
+        }
+        onAuthenticated('Account created successfully')
       } else if (mode === 'login') {
         const { error: signInError } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
         if (signInError) throw signInError
