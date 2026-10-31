@@ -1,0 +1,21 @@
+:root {
+  font-family: 'DM Sans', Arial, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
+  font-weight: 400;
+  color: #332b30;
+  background: #f6f0e8;
+}
+
+html { min-width: 320px; scroll-behavior: smooth; }
+body { min-width: 320px; min-height: 100vh; margin: 0; }
+button { font-family: inherit; }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid #7654a3;
+  outline-offset: 2px;
+}
+#root { min-height: 100vh; }
+::selection { background: #e9dccb; color: #332b30; }
