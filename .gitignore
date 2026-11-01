@@ -13,6 +13,7 @@ dist-ssr
 build
 coverage
 *.local
+.env.local
 .env*
 !.env.example
 .npmrc

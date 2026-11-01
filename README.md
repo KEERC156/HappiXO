@@ -15,10 +15,10 @@ Planning a celebration means coordinating dates, guest counts, budgets, themes, 
 - Keep a vendor shortlist with estimate, contact, notes and booking status.
 - Ask the HappiXO Copilot questions and review suggested changes before applying them.
 - Explore budget, guest-count, venue and theme scenarios.
-- Save demo plans in browser `localStorage`, or save account plans in Supabase.
-- Register, sign in, reset a password and manage multiple private events in **My Events**.
-- Import an existing browser plan into a signed-in account without deleting the local copy.
-- Print or save a professional event-plan PDF through the browser's print dialog.
+- Save clearly labeled browser demo plans in `localStorage`, or save guest plans and customer contact details in Supabase.
+- Plan without passwords, sign-in, email verification or OTP; **My Events** is scoped to a secure HttpOnly guest-session cookie in that browser.
+- Import an existing browser plan into a guest session without deleting the local copy.
+- Download a professional, branded event-plan PDF with budgets, expenses, timeline, vendors and saved AI recommendations.
 - Scroll through seven distinct locally hosted cinematic video scenes with per-section playback and poster fallbacks.
 
 Event budgets, vendor costs and simulator assumptions are planning estimates, not quotes or verified vendor information. HappiXO does not contact or book vendors.
@@ -29,7 +29,7 @@ Event budgets, vendor costs and simulator assumptions are planning estimates, no
 - Framer Motion, Lucide, Recharts
 - Express 5 and Zod for validated API requests
 - Google GenAI SDK with structured JSON responses
-- Supabase Auth and PostgreSQL for customer accounts and saved plans; browser `localStorage` for the no-credentials demo
+- Supabase PostgreSQL accessed by same-origin server endpoints for private guest details and saved plans; browser `localStorage` for the no-credentials demo
 
 ## Requirements and local setup
 
@@ -52,39 +52,39 @@ npm start
 
 `npm start` serves the production build and the API from Express. Run `npm run build` first.
 
-## Supabase accounts and saved events
+## Passwordless guest sessions and Supabase
 
-The app uses Supabase Auth for customer identity and stores authenticated customers' events, budgets, tasks, vendor checklists and generated Gemini plans in PostgreSQL. With Supabase not configured, the existing local demo remains available and saves to browser storage. Signing in does not silently delete or upload that browser data; the **Import existing plan** action explicitly copies it to the account.
+The customer planning journey collects full name, email and mobile number, then saves them in the private `customer_leads` table through the server API. Supabase service-role access stays server-side; the browser receives only an unguessable, HttpOnly, SameSite cookie. The database stores a SHA-256 hash of that guest token. Each event, expense, task, vendor checklist and AI plan is linked to that lead and is read or changed only by the API after it validates the cookie. `profiles` remains linked to Supabase Auth users and is not used for passwordless guests. No passwords, anonymous fake Auth IDs, or public customer-data policies are used.
 
-The browser bundle only reads `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` at build time. If either is missing or invalid, the landing page displays an account-storage warning and event plans are browser-demo data only; they cannot appear in Supabase. A successful build alone does not verify the connection.
+This is not an account or identity verification: a guest can access their saved plans only from the browser holding the session cookie. Clearing cookies, losing the browser, or ending the session means those records cannot be recovered through this interface. Email and mobile number are contact details only, not proof of identity. Existing Auth-owned records from the earlier app are left in the database; the passwordless UI does not sign in to or migrate those Auth accounts.
 
-1. Create a Supabase project and apply [`supabase/migrations/20261031000000_happixo_customer_data.sql`](./supabase/migrations/20261031000000_happixo_customer_data.sql) using the Supabase SQL Editor or Supabase CLI linked to your project (`supabase db push`).
-2. Create `.env` from the example only if one does not already exist:
+Without server Supabase credentials, requests fail with a visible service error; they do not report database success or silently substitute local storage. The separate demo workspace remains available and is labeled as browser-only.
+
+1. Apply [`supabase/migrations/20261031000000_happixo_customer_data.sql`](./supabase/migrations/20261031000000_happixo_customer_data.sql) if the original schema/policies are not already present, then apply [`supabase/migrations/20261031200000_passwordless_guest_planning.sql`](./supabase/migrations/20261031200000_passwordless_guest_planning.sql) in the Supabase SQL Editor or through the Supabase CLI (`supabase db push`). The second migration adds private guest leads, guest ownership fields and constraints, and the service-role-only atomic plan-save function. It does not disable RLS.
+2. Create `.env.local` from the example only if one does not already exist:
 
    ```powershell
-   if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+   if (-not (Test-Path .env.local)) { Copy-Item .env.example .env.local }
    ```
 
-   If `.env` already exists, preserve its contents and add only the two Supabase settings below.
-3. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` in `.env`. These are public browser configuration values. Never put a Supabase service-role key or database password in frontend code or any `VITE_` variable. The `.env` file is git-ignored.
-4. Configure Supabase **Authentication → URL Configuration**. Add `http://localhost:5173` to the local redirect allow list. Add the actual production origin after deployment; do not use a guessed domain. Password recovery and email confirmation redirect to the current origin.
-5. Run `npm run dev`, register an account and confirm the email if confirmation is enabled for the project.
+   The server loads `.env.local` before `.env`; existing process/Vercel environment variables take precedence. Preserve any existing local environment file and add the required server-side values there.
+3. Configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` on the local server. Add `GEMINI_API_KEY` only when real Gemini generation is desired. None of these variables have a `VITE_` prefix, and only the server reads them. Never put a service-role key or database password in frontend code or a Vite variable. `.env` is git-ignored.
+4. Configure the same variables in Vercel under **Project Settings → Environment Variables** for the relevant deployment environments, then redeploy. Do not invent a production domain: use the actual deployed origin when testing. Supabase Auth redirect URLs are not used in the passwordless guest flow.
+5. Run `npm run dev`, enter customer details, create an event and check the Supabase tables. To test isolation, create a second browser session (for example a private window) and verify it cannot retrieve the first session's records.
 
-The migration creates profiles, events, expenses, tasks, vendors and saved-plan tables; enables Row Level Security; and limits data access to the authenticated owner. It also creates profiles for Auth users and installs the `save_event_plan` RPC used for atomic event and child-record writes. Creating six tables alone is not enough: the profile trigger, policies, grants and RPC must also exist. If those tables were created manually, compare their columns with the migration before applying SQL; do not rerun its `CREATE TABLE` statements over existing tables.
+The migration assumes the original six-table schema and column names from the first migration. If those tables were created manually, compare their columns, constraints and RLS settings before applying; do not blindly rerun the original `CREATE TABLE` statements over manually created tables. The server endpoints use service-role credentials only after validating the browser's opaque session cookie; `customer_leads` has no `anon`/`authenticated` table access. In-memory request throttling is best-effort on Vercel serverless instances and is not a substitute for shared rate limiting at higher traffic.
 
-Set both public Supabase variables in Vercel under **Project Settings → Environment Variables** for each target environment (Production, Preview and Development as applicable), then trigger a new deployment. Vite embeds these values during the build. Do not configure a service-role key or database password in frontend variables.
-
-This workspace has no Supabase URL or publishable key configured. Registration, password reset, live database writes, cross-account RLS isolation and the migration therefore cannot be verified against a live Supabase project from here. Apply/verify the database setup and test using separate customer accounts before launch.
+Build success alone does not verify database connectivity. Verify customer inserts and guest-session isolation against the configured project before launch.
 
 ## Gemini integration
 
 Gemini requests are made only by the Express API, never directly from the browser.
 
-1. Copy `.env.example` to `.env`.
-2. Set `GEMINI_API_KEY` in `.env`.
+1. Copy `.env.example` to `.env.local` if it does not already exist.
+2. Set `GEMINI_API_KEY` in `.env.local`.
 3. Restart the dev server.
 
-Keep the key server-side. Do not use a `VITE_` prefix, put the value in source control, or publish it in frontend configuration. `.gitignore` excludes environment files while explicitly allowing the blank `.env.example`.
+Keep the key server-side. Do not use a `VITE_` prefix, put the value in source control, or publish it in frontend configuration. `.gitignore` excludes environment files while explicitly allowing `.env.example`.
 
 The API exposes:
 
@@ -96,7 +96,7 @@ Without a key, generation uses a clearly labeled local demo planner; those demo 
 
 ## Event-plan export
 
-Choose **Download Event Plan** in the dashboard. The browser print dialog opens with event details, current budget breakdown, saved theme recommendations, timeline, vendor checklist and planning notes. Select **Save as PDF** in the dialog to create a PDF. This works without Gemini and exports current saved data; it is a print-to-PDF workflow rather than a silent automatic file download.
+Choose **Download Event Plan** in the dashboard. A branded PDF downloads using the currently saved event's title and includes event details, budget allocations and expenses, remaining budget, timeline and task statuses, vendor checklist, and saved AI recommendations where available. Guest plans use the latest server-confirmed saved snapshot; browser demo plans must be saved locally. The illustrative sample cannot be exported as a real event. Empty sections are clearly labeled.
 
 ## Cinematic video assets
 
@@ -123,24 +123,22 @@ The repository includes Vite build/output settings, SPA fallback routing and sep
 
 1. Import the project into Vercel or deploy it with the Vercel CLI.
 2. Keep the framework preset as **Vite**; the checked-in `vercel.json` sets `npm run build` and `dist`.
-3. Add `GEMINI_API_KEY` under Vercel **Project Settings → Environment Variables** for the environments you intend to use. Do not add a `VITE_` prefix.
-4. Deploy and verify `/api/ai/status`, event-plan generation (with a valid key), and a client-side route/reload in the deployed preview. Without the key, check the clear demo/unavailable behavior.
+3. Add `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` under Vercel **Project Settings → Environment Variables**. These are server-only. Add `GEMINI_API_KEY` if Gemini generation is desired. Do not add a `VITE_` prefix to any of them.
+4. Deploy and verify `/api/ai/status`, guest customer submission, event-plan persistence and deletion, and a client-side route/reload in the deployed preview. Use the actual deployment origin; no production URL is assumed.
 
-The serverless API functions wrap the same validated Express routes. External Gemini connectivity and deployment behavior still need to be verified in the target Vercel project.
-
-For account-backed production use, also add `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` to **Project Settings → Environment Variables** and redeploy. Add the actual deployed origin (and any preview origins you intend to use) to the Supabase Auth redirect allow list. Set only the public publishable key in the Vite environment; do not configure a service-role key there.
+The serverless API functions wrap the same validated Express routes. External Gemini connectivity and deployment behavior still need to be verified in the target Vercel project. Supabase Auth redirect URLs are not used in the passwordless guest flow.
 
 ## Demo walkthrough
 
 1. Start locally with `npm run dev` and open the Vite URL.
 2. Scroll the landing page to view the distinct event scenes and try a category-specific planning button.
 3. Complete the wizard or open the demo workspace; explore Overview, Budget, Timeline, Checklist, Vendors, HappiXO Copilot, What-if and Theme studio.
-4. With Supabase configured, register/sign in, create an event, edit a value and reload to verify account persistence. Without Supabase, edit a value and refresh to verify the local demo.
-5. Use **Download Event Plan** and choose **Save as PDF** in the print dialog.
+4. With server-side Supabase credentials and migrations configured, submit guest details, create an event, edit a value, refresh in the same browser and verify the saved event. Open a separate browser session to confirm it cannot access the first session's records. Without server credentials, use only the clearly labeled local demo.
+5. Use **Download Event Plan** and confirm that the branded PDF downloads with the event's saved data.
 
 ## Future scope
 
-- Add automated Auth, database and cross-account RLS regression coverage.
+- Add automated guest-session, database and cross-session isolation regression coverage.
 - Add genuine event-specific licensed footage (including Indian mandap and stationery preparation scenes).
 - Add vendor discovery only with verified data and explicit user consent.
 - Add automated API and browser regression coverage.

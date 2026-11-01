@@ -1,17 +1,17 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { AnimatePresence, motion, useScroll, useTransform, type MotionStyle } from 'framer-motion'
 import {
-  ArrowDownRight, ArrowLeft, ArrowRight, ArrowUpRight, ArrowUpRight as OpenIcon,
+  AlertCircle, ArrowDownRight, ArrowLeft, ArrowRight, ArrowUpRight, ArrowUpRight as OpenIcon,
   BriefcaseBusiness, CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp,
   Clock3, CloudSun, Compass, Download, Flower2, Heart, IndianRupee, Lightbulb, LogOut, MapPin,
   Menu, MessageCircle, MoreHorizontal, PartyPopper, Plus, Send, Settings2,
   Sparkles, Trash2, Users, Wallet, X, type LucideIcon,
 } from 'lucide-react'
 import { askAI, generateAIPlan, getAIStatus, type EventInput, type GeneratedPlan, type ProposedChange } from './ai'
-import AuthPage from './AuthPage'
+import CustomerStartPage from './CustomerStartPage'
+import { endCustomerSession, getCustomerSession, updateCustomerSession, type CustomerDetails } from './lib/customer'
+import { downloadEventPlanPdf } from './lib/eventPdf'
 import { deleteSavedEvent, fetchEvents, normalizeEventIds, saveEventPlan } from './lib/events'
-import { isSupabaseConfigured, supabase, supabaseConfigurationError } from './lib/supabase'
-import type { User } from '@supabase/supabase-js'
 import type { Category, EventPlan, Expense, Priority, Task, TaskStatus, Vendor, VendorStatus, WizardData } from './types'
 import './App.css'
 
@@ -32,8 +32,8 @@ type ChatMessage = {
 }
 type EventDetailsDraft = Pick<EventPlan, 'name' | 'type' | 'date' | 'city' | 'budget' | 'guests' | 'theme' | 'food' | 'venue' | 'requirements'>
 
-function logDatabaseError(message: string, error: unknown) {
-  if (import.meta.env.DEV) console.error(message, error)
+function logDatabaseError(message: string) {
+  if (import.meta.env.DEV) console.error(message)
 }
 
 function proposeSavings(event: EventPlan, targetSavings: number, targetBudget = event.budget): SavingsProposal {
@@ -99,7 +99,7 @@ function toGeneratedEvent(input: WizardData, plan: GeneratedPlan): EventPlan {
 }
 
 const STORAGE_KEY = 'happixo-event-plan-v1'
-const PENDING_EVENT_KEY = 'happixo-pending-event-v1'
+const SAMPLE_EVENT_NAME = 'Aarav & Mira’s Celebration'
 const TODAY_DATE = new Date().toISOString().slice(0, 10)
 const MAX_EVENT_BUDGET = 1_000_000_000
 const MAX_EVENT_GUESTS = 100_000
@@ -177,10 +177,59 @@ function makeEvent(input: WizardData): EventPlan {
 function sampleEvent(): EventPlan {
   const date = '2026-12-12'
   return makeEvent({
-    name: 'Aarav & Mira’s Celebration', type: 'Wedding', date, city: 'Jaipur',
+    name: SAMPLE_EVENT_NAME, type: 'Wedding', date, city: 'Jaipur',
     budget: 850000, guests: 120, theme: 'Saffron garden soirée', food: 'Vegetarian + vegan options',
     venue: 'Outdoor', requirements: 'Live acoustic music, accessible seating, and a kids’ corner',
   })
+}
+function isIllustrativeSample(event: EventPlan) {
+  return event.name === SAMPLE_EVENT_NAME &&
+    event.type === 'Wedding' &&
+    event.date === '2026-12-12' &&
+    event.city === 'Jaipur' &&
+    event.budget === 850000 &&
+    event.guests === 120 &&
+    event.theme === 'Saffron garden soirée' &&
+    event.food === 'Vegetarian + vegan options' &&
+    event.venue === 'Outdoor' &&
+    event.requirements === 'Live acoustic music, accessible seating, and a kids’ corner'
+}
+function isEventPlan(value: unknown): value is EventPlan {
+  return typeof value === 'object' && value !== null &&
+    'id' in value && typeof value.id === 'string' &&
+    'name' in value && typeof value.name === 'string' &&
+    'type' in value && typeof value.type === 'string' &&
+    'date' in value && typeof value.date === 'string' &&
+    'city' in value && typeof value.city === 'string' &&
+    'budget' in value && typeof value.budget === 'number' &&
+    'guests' in value && typeof value.guests === 'number' &&
+    'theme' in value && typeof value.theme === 'string' &&
+    'food' in value && typeof value.food === 'string' &&
+    'venue' in value && typeof value.venue === 'string' &&
+    'requirements' in value && typeof value.requirements === 'string' &&
+    'concept' in value && typeof value.concept === 'string' &&
+    'expenses' in value && Array.isArray(value.expenses) &&
+    'tasks' in value && Array.isArray(value.tasks) &&
+    'vendors' in value && Array.isArray(value.vendors) &&
+    'created' in value && typeof value.created === 'string'
+}
+function readStoredBrowserEvent(eventId: string): EventPlan {
+  const raw = localStorage.getItem(STORAGE_KEY)
+  if (!raw) throw new Error('Create and save an event plan before downloading it.')
+
+  let stored: unknown
+  try {
+    stored = JSON.parse(raw)
+  } catch {
+    throw new Error('Your saved event could not be read. Save the event again, then retry.')
+  }
+  if (!isEventPlan(stored) || stored.id !== eventId) {
+    throw new Error('The saved event does not match this plan. Save your changes, then retry.')
+  }
+  if (isIllustrativeSample(stored)) {
+    throw new Error('The sample plan is for illustration. Create your own event plan before downloading.')
+  }
+  return stored
 }
 function readSavedEvent(): EventPlan {
   try {
@@ -208,67 +257,10 @@ function readSavedEvent(): EventPlan {
         created: saved.created ?? new Date().toISOString(),
       })
     }
-  } catch (error) {
-    console.warn('Could not load the saved HappiXO plan; opening the sample plan instead.', error)
+  } catch {
+    console.warn('Could not load the saved HappiXO plan; opening the sample plan instead.')
   }
   return sampleEvent()
-}
-
-function readPendingEvent(): EventPlan | null {
-  try {
-    const raw = localStorage.getItem(PENDING_EVENT_KEY)
-    if (!raw) return null
-    const parsed: unknown = JSON.parse(raw)
-    if (!parsed || typeof parsed !== 'object') return null
-    const saved = parsed as Partial<EventPlan>
-    if (
-      typeof saved.name !== 'string' || typeof saved.type !== 'string' ||
-      typeof saved.date !== 'string' || typeof saved.city !== 'string' ||
-      typeof saved.budget !== 'number' || typeof saved.guests !== 'number' ||
-      !Array.isArray(saved.expenses) || !Array.isArray(saved.tasks) ||
-      !Array.isArray(saved.vendors)
-    ) return null
-    return normalizeEventIds({
-      ...saved,
-      id: typeof saved.id === 'string' ? saved.id : id(),
-      name: saved.name,
-      type: saved.type as Category,
-      date: saved.date,
-      city: saved.city,
-      budget: saved.budget,
-      guests: saved.guests,
-      theme: saved.theme ?? '',
-      food: saved.food ?? '',
-      venue: saved.venue ?? '',
-      requirements: saved.requirements ?? '',
-      concept: saved.concept ?? '',
-      created: saved.created ?? new Date().toISOString(),
-      expenses: saved.expenses,
-      tasks: saved.tasks,
-      vendors: saved.vendors,
-    })
-  } catch (error) {
-    console.warn('Could not restore a pending HappiXO event for account saving.', error)
-    return null
-  }
-}
-
-function storePendingEvent(event: EventPlan): boolean {
-  try {
-    localStorage.setItem(PENDING_EVENT_KEY, JSON.stringify(event))
-    return true
-  } catch (error) {
-    console.error('Could not preserve the generated event while awaiting account sign-in.', error)
-    return false
-  }
-}
-
-function clearPendingEvent() {
-  try {
-    localStorage.removeItem(PENDING_EVENT_KEY)
-  } catch (error) {
-    console.warn('The event was saved, but the temporary browser copy could not be cleared.', error)
-  }
 }
 
 function readLocalPlanForImport(): EventPlan | null {
@@ -280,8 +272,8 @@ function readLocalPlanForImport(): EventPlan | null {
       !('expenses' in parsed) || !Array.isArray(parsed.expenses) ||
       !('tasks' in parsed) || !Array.isArray(parsed.tasks)) return null
     return readSavedEvent()
-  } catch (error) {
-    console.warn('Could not inspect the existing browser plan for account import.', error)
+  } catch {
+    console.warn('Could not inspect the existing browser plan for account import.')
     return null
   }
 }
@@ -306,11 +298,14 @@ const navItems: { name: Tab; icon: LucideIcon }[] = [
 
 function App() {
   const [event, setEvent] = useState<EventPlan>(readSavedEvent)
-  const [page, setPage] = useState<'landing' | 'wizard' | 'auth' | 'events' | 'dashboard'>('landing')
-  const [user, setUser] = useState<User | null>(null)
-  const [authMode, setAuthMode] = useState<'login' | 'update'>('login')
-  const [authReady, setAuthReady] = useState(!supabase)
+  const [page, setPage] = useState<'landing' | 'customer' | 'wizard' | 'events' | 'dashboard'>('landing')
+  const [customer, setCustomer] = useState<CustomerDetails | null>(null)
+  const [customerReady, setCustomerReady] = useState(false)
+  const [customerServiceError, setCustomerServiceError] = useState('')
+  const [guestData, setGuestData] = useState(false)
+  const [pendingCategory, setPendingCategory] = useState<Category>()
   const [profileName, setProfileName] = useState('')
+  const [profilePhone, setProfilePhone] = useState('')
   const [cloudEvents, setCloudEvents] = useState<EventPlan[]>([])
   const [cloudLoaded, setCloudLoaded] = useState(false)
   const [cloudLoading, setCloudLoading] = useState(false)
@@ -319,16 +314,13 @@ function App() {
   const [cloudSaveError, setCloudSaveError] = useState('')
   const [cloudError, setCloudError] = useState('')
   const [cloudReload, setCloudReload] = useState(0)
-  const [pendingEvent, setPendingEvent] = useState<EventPlan | null>(readPendingEvent)
-  const [pendingEventRetry, setPendingEventRetry] = useState(0)
-  const [pendingEventError, setPendingEventError] = useState('')
   const [localPlanToImport] = useState<EventPlan | null>(readLocalPlanForImport)
   const [localImportDone, setLocalImportDone] = useState(false)
-  const [profilePhone, setProfilePhone] = useState('')
   const [tab, setTab] = useState<Tab>('Overview')
   const [mobileNav, setMobileNav] = useState(false)
   const [toast, setToast] = useState('')
-  const [isPrintingPlan, setIsPrintingPlan] = useState(false)
+  const [isDownloadingPlan, setIsDownloadingPlan] = useState(false)
+  const toastIsError = toast.startsWith('Could not download') || toast.startsWith('Your saved event could not be verified') || toast.startsWith('Wait until your event')
   const [aiConfigured, setAIConfigured] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isChatLoading, setIsChatLoading] = useState(false)
@@ -351,75 +343,34 @@ function App() {
   const [simWeather, setSimWeather] = useState(false)
 
   useEffect(() => {
-    if (!supabase) {
-      return
-    }
     let active = true
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((authEvent, session) => {
+    void getCustomerSession().then(({ customer: savedCustomer }) => {
       if (!active) return
-      setUser(session?.user ?? null)
-      setAuthReady(true)
-      if (!session?.user) {
-        setCloudLoaded(false)
-        setCloudLoading(false)
-        setCloudEvents([])
-        setCloudSaved(false)
-        setCloudError('')
-        setCloudSaveError('')
-        setProfileName('')
-        setProfilePhone('')
-        setLocalImportDone(false)
-      } else if (authEvent !== 'TOKEN_REFRESHED') {
+      setCustomer(savedCustomer)
+      if (savedCustomer) {
+        setGuestData(true)
+        setProfileName(savedCustomer.fullName)
+        setProfilePhone(savedCustomer.mobileNumber)
         setCloudLoading(true)
-        setCloudLoaded(false)
-        setCloudError('')
+        setPage('events')
       }
-      if (authEvent === 'PASSWORD_RECOVERY') {
-        setAuthMode('update')
-        setPage('auth')
-        return
-      }
-      if (authEvent === 'SIGNED_IN') setAuthMode('login')
-      if (!session?.user && isSupabaseConfigured) setPage((current) => current === 'dashboard' || current === 'events' ? 'auth' : current)
-    })
-    void supabase.auth.getSession().then(({ data, error }) => {
+    }).catch((error: unknown) => {
       if (!active) return
-      if (error) {
-        logDatabaseError('Could not restore the HappiXO sign-in session.', error)
-        setToast('Could not restore your sign-in session. Please sign in again.')
-      }
-      setUser(data.session?.user ?? null)
-      setAuthReady(true)
-      if (data.session?.user) setCloudLoading(true)
-      if (window.location.hash.includes('type=recovery')) {
-        setAuthMode('update')
-        setPage('auth')
-      } else if (data.session?.user) setPage('events')
+      logDatabaseError('Could not restore the HappiXO guest session.')
+      setCustomerServiceError(error instanceof Error ? error.message : 'Customer storage is unavailable.')
+    }).finally(() => {
+      if (active) setCustomerReady(true)
     })
-    return () => {
-      active = false
-      subscription.unsubscribe()
-    }
+    return () => { active = false }
   }, [])
 
-  const userId = user?.id
-  const userName = user?.user_metadata.full_name
   useEffect(() => {
-    if (!userId || !supabase) return
+    if (!customer) return
     let active = true
-    void Promise.all([
-      fetchEvents(userId),
-      supabase.from('profiles').select('full_name,phone').eq('id', userId).maybeSingle(),
-    ]).then(([savedEvents, profileResult]) => {
+    void fetchEvents().then((savedEvents) => {
       if (!active) return
-      if (profileResult.error) throw profileResult.error
-      if (!profileResult.data) {
-        throw new Error('Your customer profile is missing. Apply the HappiXO Supabase migration and try again.')
-      }
       setCloudEvents(savedEvents)
-      setProfileName(profileResult.data?.full_name || String(userName ?? 'HappiXO customer'))
-      setProfilePhone(profileResult.data?.phone ?? '')
-      setLocalImportDone(localStorage.getItem(`happixo-imported-${userId}`) === 'true')
+      setLocalImportDone(localStorage.getItem(`happixo-imported-${customer.id}`) === 'true')
       if (savedEvents.length) {
         setEvent(savedEvents[0])
         setSimBudget(savedEvents[0].budget)
@@ -431,48 +382,49 @@ function App() {
       setCloudLoaded(true)
     }).catch((error: unknown) => {
       if (!active) return
-      logDatabaseError('Could not load the customer’s HappiXO data.', error)
+      logDatabaseError('Could not load the customer’s HappiXO data.')
       const message = error instanceof Error ? error.message : 'Could not load your saved events.'
       setCloudError(message)
-      setToast(`Could not load your saved events: ${message}`)
     }).finally(() => {
       if (active) setCloudLoading(false)
     })
     return () => { active = false }
-  }, [userId, userName, cloudReload])
+  }, [customer, cloudReload])
 
   useEffect(() => {
-    if (isSupabaseConfigured) return
+    if (customer || guestData) return
+    if (isIllustrativeSample(event)) return
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(event)) }
-    catch (error) { console.error('Unable to save the HappiXO event in this browser.', error); window.setTimeout(() => setToast('Could not save changes in this browser.'), 0) }
-  }, [event])
+    catch { console.error('Unable to save the HappiXO event in this browser.'); window.setTimeout(() => setToast('Could not save changes in this browser.'), 0) }
+  }, [event, customer, guestData])
   useEffect(() => {
-    if (!user || !cloudLoaded || !supabase || page !== 'dashboard') return
+    if (!customer || !cloudLoaded || page !== 'dashboard') return
     let active = true
     const timer = window.setTimeout(() => {
       setCloudSaving(true)
       setCloudSaved(false)
       setCloudSaveError('')
-      void saveEventPlan(user.id, event).then(async (savedId) => {
+      void saveEventPlan(event).then(async (savedId) => {
         if (!active) return
         setCloudSaved(true)
         if (savedId !== event.id) setEvent((current) => current.id === event.id ? { ...current, id: savedId } : current)
         try {
-          const savedEvents = await fetchEvents(user.id)
+          const savedEvents = await fetchEvents()
           if (!active) return
           setCloudEvents(savedEvents)
           setCloudSaveError('')
+          setToast('Event plan saved to your private guest session.')
         } catch (error) {
           if (!active) return
-          logDatabaseError('The event was saved, but the event list could not be refreshed.', error)
+          logDatabaseError('The event was saved, but the event list could not be refreshed.')
           const message = error instanceof Error ? error.message : 'Please reopen My Events to refresh.'
           setCloudSaveError(`Saved, but refresh failed: ${message}`)
           setToast(`Your event was saved, but HappiXO could not refresh the event list: ${message}`)
         }
       }).catch((error: unknown) => {
         if (!active) return
-        logDatabaseError('Could not save this HappiXO event to Supabase.', error)
-        const message = error instanceof Error ? error.message : 'Could not save your event to your account.'
+        logDatabaseError('Could not save this HappiXO event to Supabase.')
+        const message = error instanceof Error ? error.message : 'Could not save your event to your guest session.'
         setCloudSaved(false)
         setCloudSaveError(message)
         setToast(`Could not save your event: ${message}`)
@@ -484,64 +436,22 @@ function App() {
       active = false
       window.clearTimeout(timer)
     }
-  }, [event, user, cloudLoaded, page])
+  }, [event, customer, cloudLoaded, page])
   useEffect(() => {
     if (!toast) return
     const timer = window.setTimeout(() => setToast(''), 2800)
     return () => window.clearTimeout(timer)
   }, [toast])
   useEffect(() => {
-    if (!isPrintingPlan) return
-    const handleAfterPrint = () => setIsPrintingPlan(false)
-    window.addEventListener('afterprint', handleAfterPrint)
-    const frame = window.requestAnimationFrame(() => window.print())
-    return () => {
-      window.cancelAnimationFrame(frame)
-      window.removeEventListener('afterprint', handleAfterPrint)
-    }
-  }, [isPrintingPlan])
-  useEffect(() => {
     let active = true
     getAIStatus().then((status) => {
       if (active) setAIConfigured(status.configured)
-    }).catch((error: unknown) => {
-      console.info('HappiXO is using the local demo assistant because its API is unavailable.', error)
+    }).catch(() => {
+      console.info('HappiXO is using the local demo assistant because its API is unavailable.')
       if (active) setAIConfigured(false)
     })
     return () => { active = false }
   }, [])
-  useEffect(() => {
-    if (!user || !cloudLoaded || !pendingEvent) return
-    let active = true
-    const newEvent = normalizeEventIds(pendingEvent)
-    void saveEventPlan(user.id, newEvent).then(async (savedId) => {
-      if (!active) return
-      const savedEvents = await fetchEvents(user.id)
-      if (!active) return
-      const savedEvent = savedEvents.find((item) => item.id === savedId) ?? { ...newEvent, id: savedId }
-      setCloudEvents(savedEvents)
-      setEvent(savedEvent)
-      setPendingEvent(null)
-      clearPendingEvent()
-      setPendingEventError('')
-      setCloudSaved(true)
-      setSimBudget(savedEvent.budget)
-      setSimGuests(savedEvent.guests)
-      setSimVenue(savedEvent.venue)
-      setSimTheme(savedEvent.theme)
-      setPage('dashboard')
-      setToast('Your event is saved to your HappiXO account.')
-    }).catch((error: unknown) => {
-      if (!active) return
-      logDatabaseError('Could not save your newly created event.', error)
-      const message = error instanceof Error ? error.message : 'Could not save your event to your account.'
-      setPendingEventError(message)
-      setPage('events')
-      setToast(`Could not save your event: ${message}`)
-    })
-    return () => { active = false }
-  }, [user, cloudLoaded, pendingEvent, pendingEventRetry])
-
   const planned = event.expenses.reduce((sum, row) => sum + row.planned, 0)
   const spent = event.expenses.reduce((sum, row) => sum + row.actual, 0)
   const remaining = event.budget - spent
@@ -563,8 +473,36 @@ function App() {
     return Math.max(0, planned + guestImpact + venueImpact + themeImpact + weatherImpact - proposedSavings)
   }, [event, simBudget, simGuests, simVenue, simTheme, simWeather])
 
+  const downloadEventPlan = async () => {
+    if (isDownloadingPlan) return
+    if (customer && (!cloudLoaded || cloudLoading || cloudSaving || !cloudSaved || cloudSaveError)) {
+      setToast(cloudError || cloudSaveError
+        ? `Your saved event could not be verified: ${cloudError || cloudSaveError}`
+        : 'Wait until your event shows as saved, then download the PDF.')
+      return
+    }
+
+    setIsDownloadingPlan(true)
+    try {
+      let savedEvent = event
+      if (customer) {
+        const matchingEvent = cloudEvents.find((saved) => saved.id === event.id)
+        if (!matchingEvent) throw new Error('This event was not found in your saved guest session. Open My Events and retry.')
+        savedEvent = matchingEvent
+      } else {
+        savedEvent = readStoredBrowserEvent(event.id)
+      }
+      const filename = await downloadEventPlanPdf(savedEvent)
+      setToast(`Downloaded ${filename}`)
+    } catch (error) {
+      setToast(error instanceof Error ? `Could not download the event PDF: ${error.message}` : 'Could not download the event PDF. Please try again.')
+    } finally {
+      setIsDownloadingPlan(false)
+    }
+  }
+
   const updateEvent = (update: Partial<EventPlan>) => {
-    if (user) {
+    if (customer) {
       setCloudSaved(false)
       setCloudSaveError('')
     }
@@ -583,34 +521,34 @@ function App() {
   }
   const saveEventDetails = (details: EventDetailsDraft) => {
     updateEvent(details)
-    setToast(user ? 'Event details updated. Saving to your account…' : 'Event details updated.')
+    setToast(customer ? 'Event details updated. Saving to your guest session…' : 'Event details updated in browser demo.')
   }
   const updateExpense = (expenseId: string, key: 'planned' | 'actual' | 'name', value: string | number) => {
-    if (user) setCloudSaved(false)
+    if (customer) setCloudSaved(false)
     const normalized = key === 'name' ? value : boundedAmount(Number(value))
     setEvent((current) => ({ ...current, expenses: current.expenses.map((row) => row.id === expenseId ? { ...row, [key]: normalized } : row) }))
   }
   const updateTask = (taskId: string, update: Partial<Task>) => {
-    if (user) setCloudSaved(false)
+    if (customer) setCloudSaved(false)
     setEvent((current) => ({ ...current, tasks: current.tasks.map((task) => task.id === taskId ? { ...task, ...update } : task) }))
   }
   const updateVendor = (vendorId: string, update: Partial<Vendor>) => {
-    if (user) setCloudSaved(false)
+    if (customer) setCloudSaved(false)
     setEvent((current) => ({ ...current, vendors: current.vendors.map((vendor) => vendor.id === vendorId ? { ...vendor, ...update } : vendor) }))
   }
   const addVendor = () => {
-    if (user) setCloudSaved(false)
+    if (customer) setCloudSaved(false)
     setEvent((current) => ({
       ...current,
       vendors: [...current.vendors, { id: id(), category: 'New vendor', estimatedCost: 0, status: 'To do', contact: '', notes: '' }],
     }))
   }
   const openWorkspace = () => {
-    if (user) setPage('events')
-    else if (isSupabaseConfigured) setPage('auth')
-    else setPage('dashboard')
+    if (customer) setPage('events')
+    else setPage('customer')
   }
   const openSavedEvent = (savedEvent: EventPlan) => {
+    setGuestData(true)
     setEvent(savedEvent)
     setCloudSaved(true)
     setSimBudget(savedEvent.budget)
@@ -620,63 +558,85 @@ function App() {
     setTab('Overview')
     setPage('dashboard')
   }
-  const signOut = async () => {
-    if (!supabase) return
-    const { error } = await supabase.auth.signOut()
-    if (error) {
-      setToast(`Could not sign out: ${error.message}`)
-      return
+  const endSession = async () => {
+    try {
+      await endCustomerSession()
+      setCustomer(null)
+      setCloudEvents([])
+      setCloudLoaded(false)
+      setCloudSaved(false)
+      setProfileName('')
+      setProfilePhone('')
+      setPage('landing')
+      setToast('Guest planning session ended on this browser.')
+    } catch (error) {
+      setToast(error instanceof Error ? `Could not end the session: ${error.message}` : 'Could not end the guest session.')
     }
-    setUser(null)
-    setPage('landing')
   }
   const saveProfile = async (fullName: string, phone: string) => {
-    if (!user || !supabase) throw new Error('Sign in with a configured Supabase account to update your profile.')
-    const { data, error } = await supabase.from('profiles')
-      .update({ full_name: fullName.trim(), phone: phone.trim() || null })
-      .eq('id', user.id)
-      .select('full_name,phone')
-      .single()
-    if (error) throw error
-    setProfileName(data.full_name)
-    setProfilePhone(data.phone ?? '')
-    setToast('Your profile was updated in Supabase.')
+    const { customer: updatedCustomer } = await updateCustomerSession({
+      fullName: fullName.trim(), mobileNumber: phone.trim(),
+    })
+    setCustomer(updatedCustomer)
+    setProfileName(updatedCustomer.fullName)
+    setProfilePhone(updatedCustomer.mobileNumber)
+    setToast('Your customer details were updated.')
+  }
+  const startWizard = (type?: Category) => {
+    if (!customer) {
+      setPendingCategory(type)
+      setPage('customer')
+      return
+    }
+    setWizard((current) => ({ ...current, ...(type ? { type } : {}) }))
+    setStep(0); setPage('wizard'); window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+  const customerReadyForPlanning = (savedCustomer: CustomerDetails) => {
+    setCustomer(savedCustomer)
+    setGuestData(true)
+    setProfileName(savedCustomer.fullName)
+    setProfilePhone(savedCustomer.mobileNumber)
+    setCustomerServiceError('')
+    setCloudLoading(true)
+    setCloudLoaded(false)
+    setCloudError('')
+    setWizard((current) => ({ ...current, ...(pendingCategory ? { type: pendingCategory } : {}) }))
+    setPendingCategory(undefined)
+    setStep(0)
+    setPage('wizard')
+    setToast('Your details are saved. Let’s plan your celebration.')
   }
   const importLocalEvent = async () => {
-    if (!user || !localPlanToImport || !supabase) return
+    if (!customer || !localPlanToImport) return
     const imported = normalizeEventIds(localPlanToImport)
     try {
-      const savedId = await saveEventPlan(user.id, imported)
-      const savedEvents = await fetchEvents(user.id)
+      const savedId = await saveEventPlan(imported)
+      const savedEvents = await fetchEvents()
       const savedEvent = savedEvents.find((item) => item.id === savedId) ?? { ...imported, id: savedId }
-      try { localStorage.setItem(`happixo-imported-${user.id}`, 'true') }
-      catch (error) { console.warn('Could not remember that the browser plan was imported.', error) }
+      try { localStorage.setItem(`happixo-imported-${customer.id}`, 'true') }
+      catch { console.warn('Could not remember that the browser plan was imported.') }
       setLocalImportDone(true)
       setCloudEvents(savedEvents)
       openSavedEvent(savedEvent)
-      setToast('Your existing browser plan was imported. The original local copy remains available.')
+      setToast('Your existing browser plan was saved to your guest session. The original browser copy remains.')
     } catch (error) {
-      logDatabaseError('Could not import the existing browser plan.', error)
+      logDatabaseError('Could not import the existing browser plan.')
       setToast(error instanceof Error ? `Could not import your plan: ${error.message}` : 'Could not import your existing plan.')
     }
   }
   const removeSavedEvent = async (savedEvent: EventPlan) => {
-    if (!user || !window.confirm(`Delete “${savedEvent.name}” and its saved budget, tasks, vendor list and recommendations? This cannot be undone.`)) return
+    if (!customer || !window.confirm(`Delete “${savedEvent.name}” and its saved budget, tasks, vendor list and recommendations? This cannot be undone.`)) return
     try {
       await deleteSavedEvent(savedEvent.id)
-      const remainingEvents = await fetchEvents(user.id)
+      const remainingEvents = await fetchEvents()
       setCloudEvents(remainingEvents)
       setCloudSaved(remainingEvents.length > 0)
       if (event.id === savedEvent.id) setPage('events')
       setToast('The event and its related planning data were deleted.')
     } catch (error) {
-      logDatabaseError('Could not delete the saved event.', error)
+      logDatabaseError('Could not delete the saved event.')
       setToast(error instanceof Error ? `Could not delete the event: ${error.message}` : 'Could not delete the saved event.')
     }
-  }
-  const startWizard = (type?: Category) => {
-    setWizard((current) => ({ ...current, ...(type ? { type } : {}) }))
-    setStep(0); setPage('wizard'); window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   const generatePlan = async () => {
     const data = { ...wizard }
@@ -710,25 +670,17 @@ function App() {
       try {
         const generated = await generateAIPlan(data as EventInput)
         const generatedEvent = normalizeEventIds(toGeneratedEvent(data, generated))
-        if (user) setCloudSaved(false)
+        setGuestData(Boolean(customer))
+        if (customer) setCloudSaved(false)
         setEvent(generatedEvent)
         setSimBudget(data.budget); setSimGuests(data.guests); setSimVenue(data.venue); setSimTheme(generated.theme.name); setSimWeather(false)
         setTab('Overview')
-        if (isSupabaseConfigured && !user) {
-          const preserved = storePendingEvent(generatedEvent)
-          setPendingEvent(generatedEvent)
-          setPage('auth')
-          setToast(preserved
-            ? 'Sign in or create an account to save this event and its HappiXO recommendations.'
-            : 'Sign in to save this event. Keep this page open while you complete account setup.')
-        } else {
-          setPage('dashboard')
-          setToast(user ? 'Your Gemini plan is ready and is being saved to your account.' : 'Your Gemini plan is ready in browser demo mode.')
-        }
+        setPage('dashboard')
+        setToast(customer ? 'Your Gemini plan is ready. Saving it to your guest session…' : 'Your Gemini plan is ready in browser demo mode.')
         setIsGenerating(false)
         return
       } catch (error) {
-        console.error('Gemini plan generation failed; using the local demo planner.', error)
+        console.error('Gemini plan generation failed; using the local demo planner.')
         setAIConfigured(false)
         setToast(error instanceof Error ? `${error.message} A local demo plan is ready instead.` : 'Gemini is unavailable. A local demo plan is ready instead.')
       }
@@ -736,21 +688,13 @@ function App() {
       setToast('Gemini is not configured. Your plan is generated locally in demo mode.')
     }
     const localEvent = normalizeEventIds(makeEvent(data))
-    if (user) setCloudSaved(false)
+    setGuestData(Boolean(customer))
+    if (customer) setCloudSaved(false)
     setEvent(localEvent)
     setSimBudget(data.budget); setSimGuests(data.guests); setSimVenue(data.venue); setSimTheme(data.theme); setSimWeather(false)
     setTab('Overview')
-    if (isSupabaseConfigured && !user) {
-      const preserved = storePendingEvent(localEvent)
-      setPendingEvent(localEvent)
-      setPage('auth')
-      setToast(preserved
-        ? 'Sign in or create an account to save this event to your account.'
-        : 'Sign in to save this event. Keep this page open while you complete account setup.')
-    } else {
-      setPage('dashboard')
-      if (!user) setToast('This plan is in browser demo mode and is not saved to Supabase.')
-    }
+    setPage('dashboard')
+    setToast(customer ? 'Your event plan is ready. Saving it to your guest session…' : 'This plan is browser demo data and is not saved to Supabase.')
     setIsGenerating(false)
   }
   const nextWizard = () => {
@@ -759,16 +703,16 @@ function App() {
     setStep((current) => Math.min(2, current + 1))
   }
   const addExpense = () => {
-    if (user) setCloudSaved(false)
+    if (customer) setCloudSaved(false)
     setEvent((current) => ({ ...current, expenses: [...current.expenses, { id: id(), name: 'New expense', planned: 0, actual: 0, color: palette[current.expenses.length % palette.length] }] }))
   }
   const addTask = (e: FormEvent) => {
     e.preventDefault()
     if (!newTask.trim()) return
-    if (user) setCloudSaved(false)
+    if (customer) setCloudSaved(false)
     setEvent((current) => ({ ...current, tasks: [...current.tasks, { id: id(), name: newTask.trim(), description: 'Added to your event checklist.', dueDate: current.date, priority: 'Medium', status: 'To do' }] }))
     setNewTask('')
-    setToast(user ? 'Task added. Saving to your account…' : 'Task added to your browser demo.')
+    setToast(customer ? 'Task added. Saving to your guest session…' : 'Task added to your browser demo.')
   }
   const sendQuestion = async (e: FormEvent) => {
     e.preventDefault()
@@ -818,7 +762,7 @@ function App() {
         }])
         return
       } catch (error) {
-        console.error('Gemini copilot request failed; using local demo suggestions.', error)
+        console.error('Gemini copilot request failed; using local demo suggestions.')
         setAIConfigured(false)
         setToast(error instanceof Error ? `${error.message} Local suggestions are still available.` : 'Gemini is unavailable. Local suggestions are still available.')
       }
@@ -861,14 +805,14 @@ function App() {
       budget: proposal.targetBudget,
       expenses: event.expenses.map((expense) => changes.has(expense.id) ? { ...expense, planned: changes.get(expense.id)! } : expense),
     })
-    setToast(user ? 'Changes applied. Saving to your account…' : 'Changes applied to your browser demo.')
+    setToast(customer ? 'Changes applied. Saving to your guest session…' : 'Changes applied to your browser demo.')
   }
   const applyChange = (change: ProposedChange) => {
     if (change.field === 'budget') {
       const targetBudget = Number(change.value)
       if (targetBudget > event.budget) {
         updateEvent({ budget: targetBudget })
-        setToast(user ? 'Changes applied. Saving to your account…' : 'Changes applied to your browser demo.')
+        setToast(customer ? 'Changes applied. Saving to your guest session…' : 'Changes applied to your browser demo.')
         return
       }
       const proposal = proposeSavings(event, event.budget - targetBudget, targetBudget)
@@ -881,7 +825,7 @@ function App() {
     else if (change.field === 'food') updateEvent({ food: String(change.value) })
     else if (change.field === 'venue') updateEvent({ venue: String(change.value) })
     else updateEvent({ requirements: String(change.value) })
-    setToast(user ? 'Changes applied. Saving to your account…' : 'Changes applied to your browser demo.')
+    setToast(customer ? 'Changes applied. Saving to your guest session…' : 'Changes applied to your browser demo.')
   }
   const applySuggestion = (suggestion: NonNullable<ChatMessage['suggestion']>) => {
     if (suggestion.type === 'budget') {
@@ -889,7 +833,7 @@ function App() {
       applySavingsProposal(proposeSavings(event, event.budget - targetBudget, targetBudget))
     } else if (suggestion.type === 'guests') updateEvent({ guests: Number(suggestion.value) })
     else updateEvent({ theme: String(suggestion.value) })
-    setToast(user ? 'Changes applied. Saving to your account…' : 'Changes applied to your browser demo.')
+    setToast(customer ? 'Changes applied. Saving to your guest session…' : 'Changes applied to your browser demo.')
   }
   const applyScenario = (proposal?: SavingsProposal) => {
     const expenseChanges = new Map((proposal?.changes ?? []).map((change) => [change.expenseId, change.to]))
@@ -919,42 +863,38 @@ function App() {
     setSimWeather(false)
     setToast(proposal?.shortfall
       ? `Applied feasible scenario changes; the requested budget reduction still needs ${formatINR(proposal.shortfall)} more savings.`
-      : user ? 'Scenario changes applied. Saving to your account…' : 'Scenario changes applied to your browser demo.')
+      : customer ? 'Scenario changes applied. Saving to your guest session…' : 'Scenario changes applied to your browser demo.')
   }
 
   return (
-    <div className={`app-shell ${isPrintingPlan ? 'printing-plan' : ''}`}>
-      {!isPrintingPlan && <AnimatePresence mode="wait">
-        {!authReady && isSupabaseConfigured ? (
-          <motion.div key="auth-loading" className="auth-loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }}><Sparkles size={20} /> Restoring your HappiXO session…</motion.div>
+    <div className="app-shell">
+      <AnimatePresence mode="wait">
+        {!customerReady ? (
+          <motion.div key="auth-loading" className="auth-loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }}><Sparkles size={20} /> Restoring your HappiXO planning session…</motion.div>
         ) : page === 'landing' ? (
           <motion.div key="landing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-            <Landing onStart={startWizard} onDashboard={openWorkspace} onAuth={() => setPage('auth')} />
+            <Landing onStart={startWizard} onDashboard={openWorkspace} onDemo={() => {
+              if (customer) openWorkspace()
+              else { setGuestData(false); setEvent(readSavedEvent()); setPage('dashboard') }
+            }} customerActive={Boolean(customer)} serviceError={customerServiceError} />
+          </motion.div>
+        ) : page === 'customer' ? (
+          <motion.div key="customer" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+            <CustomerStartPage onBack={() => setPage('landing')} onCustomerReady={customerReadyForPlanning} />
           </motion.div>
         ) : page === 'wizard' ? (
           <motion.div key="wizard" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
             <Wizard
               data={wizard} setData={setWizard} step={step} setStep={setStep} naturalText={naturalText}
-              setNaturalText={setNaturalText} accountSaved={Boolean(user)} onBack={() => step > 0 ? setStep(step - 1) : setPage('landing')}
+              setNaturalText={setNaturalText} accountSaved={Boolean(customer)} onBack={() => step > 0 ? setStep(step - 1) : setPage('landing')}
               onNext={nextWizard} onGenerate={generatePlan} isGenerating={isGenerating}
-            />
-          </motion.div>
-        ) : page === 'auth' ? (
-          <motion.div key="auth" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-            <AuthPage
-              initialMode={authMode}
-              onBack={() => setPage('landing')}
-              onAuthenticated={(successMessage) => {
-                setPage('events')
-                if (successMessage) setToast(successMessage)
-              }}
             />
           </motion.div>
         ) : page === 'events' ? (
           <motion.div key="events" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
             <EventsPage
-              events={cloudEvents} loading={cloudLoading} loaded={cloudLoaded} error={cloudError} saveError={pendingEventError}
-              profileName={profileName} profileEmail={user?.email ?? ''} profilePhone={profilePhone} localPlanAvailable={Boolean(localPlanToImport) && !localImportDone}
+              events={cloudEvents} loading={cloudLoading} loaded={cloudLoaded} error={cloudError} saveError={cloudSaveError}
+              profileName={profileName} profileEmail={customer?.email ?? ''} profilePhone={profilePhone} localPlanAvailable={Boolean(localPlanToImport) && !localImportDone}
               onRetry={() => {
                 setCloudLoaded(false)
                 setCloudLoading(true)
@@ -963,10 +903,11 @@ function App() {
                 setCloudReload((current) => current + 1)
               }}
               onRetrySave={() => {
-                setPendingEventError('')
-                setPendingEventRetry((current) => current + 1)
+                setCloudSaveError('')
+                setCloudSaved(false)
+                setEvent((current) => ({ ...current }))
               }} onCreate={() => startWizard()}
-              onOpen={openSavedEvent} onDelete={removeSavedEvent} onImport={importLocalEvent} onSignOut={signOut} onSaveProfile={saveProfile}
+              onOpen={openSavedEvent} onDelete={removeSavedEvent} onImport={importLocalEvent} onEndSession={endSession} onSaveProfile={saveProfile}
             />
           </motion.div>
         ) : (
@@ -985,22 +926,22 @@ function App() {
               </div>
               <div className="sidebar-spacer" />
               <div className="sidebar-help"><span className="help-icon"><CircleHelp size={17} /></span><div><b>Planning a lot?</b><small>Your plan saves automatically.</small></div></div>
-              <div className="profile-row"><div className="profile-avatar">{(profileName || 'H').slice(0, 1).toUpperCase()}</div><div><b>{profileName || 'HappiXO guest'}</b><small>{user?.email || 'Demo workspace'}</small></div><button className="icon-button" title={user ? 'Sign out' : 'Account'} aria-label={user ? 'Sign out' : 'Sign in'} onClick={user ? signOut : () => setPage('auth')}><LogOut size={17} /></button></div>
+              <div className="profile-row"><div className="profile-avatar">{(profileName || 'H').slice(0, 1).toUpperCase()}</div><div><b>{profileName || 'HappiXO demo'}</b><small>{customer?.email || 'Browser demo'}</small></div>{customer && <button className="icon-button" title="End guest session" aria-label="End guest session" onClick={() => void endSession()}><LogOut size={17} /></button>}</div>
             </aside>
             <main className="dashboard-main">
               <header className="dashboard-topbar">
                 <button className="icon-button mobile-menu" onClick={() => setMobileNav(!mobileNav)} aria-label="Toggle navigation"><Menu size={20} /></button>
                 <div className="breadcrumb">My events <ChevronRight size={14} /> <b>{event.name}</b></div>
-                <div className="topbar-actions"><span className="demo-pill" title={cloudSaveError || undefined}><span /> {user ? cloudSaving ? 'Saving…' : cloudSaveError ? cloudSaveError.startsWith('Saved,') ? 'Saved · refresh needed' : 'Save failed' : cloudSaved ? 'Saved to your account' : 'Not saved yet' : supabase ? 'Sign in to save' : aiConfigured ? 'Gemini · browser demo' : 'Demo · browser only'}</span>{user && <button className="topbar-link" onClick={() => setPage('events')}>My Events</button>}<button className="button button-light button-small export-plan-button" onClick={() => setIsPrintingPlan(true)}><Download size={14} /> Download Event Plan</button><button className="topbar-link" onClick={() => setPage('landing')}>Home <OpenIcon size={14} /></button></div>
+                <div className="topbar-actions"><span className="demo-pill" title={cloudSaveError || undefined}><span /> {customer ? cloudSaving ? 'Saving…' : cloudSaveError ? cloudSaveError.startsWith('Saved,') ? 'Saved · refresh needed' : 'Save failed' : cloudSaved ? 'Saved to guest session' : 'Not saved yet' : aiConfigured ? 'Gemini · browser demo' : 'Demo · browser only'}</span>{customer && <button className="topbar-link" onClick={() => setPage('events')}>My Events</button>}<button className="button button-light button-small export-plan-button" disabled={isDownloadingPlan} onClick={() => void downloadEventPlan()}><Download size={14} /> {isDownloadingPlan ? 'Preparing PDF…' : 'Download Event Plan'}</button><button className="topbar-link" onClick={() => setPage('landing')}>Home <OpenIcon size={14} /></button></div>
               </header>
               <div className="dashboard-content">
                 <AnimatePresence mode="wait">
                   <motion.section key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: .18 }}>
-                    {tab === 'Overview' && <Overview event={event} planned={planned} spent={spent} remaining={remaining} utilization={utilization} progress={progress} upcoming={upcoming} chartData={chartData} accountSaved={Boolean(user)} onGo={setTab} onSaveDetails={saveEventDetails} />}
+                    {tab === 'Overview' && <Overview event={event} planned={planned} spent={spent} remaining={remaining} utilization={utilization} progress={progress} upcoming={upcoming} chartData={chartData} accountSaved={Boolean(customer)} onGo={setTab} onSaveDetails={saveEventDetails} />}
                     {tab === 'Budget' && <BudgetPage event={event} planned={planned} spent={spent} remaining={remaining} utilization={utilization} chartData={chartData} updateEvent={updateEvent} updateExpense={updateExpense} addExpense={addExpense} />}
-                    {tab === 'Timeline' && <TimelinePage event={event} tasks={event.tasks} updateTask={updateTask} deleteTask={(taskId) => { if (user) setCloudSaved(false); setEvent((current) => ({ ...current, tasks: current.tasks.filter((task) => task.id !== taskId) })) }} addTask={addTask} newTask={newTask} setNewTask={setNewTask} filter={taskFilter} setFilter={setTaskFilter} />}
-                    {tab === 'Checklist' && <ChecklistPage event={event} tasks={event.tasks} progress={progress} updateTask={updateTask} deleteTask={(taskId) => { if (user) setCloudSaved(false); setEvent((current) => ({ ...current, tasks: current.tasks.filter((task) => task.id !== taskId) })) }} addTask={addTask} newTask={newTask} setNewTask={setNewTask} filter={taskFilter} setFilter={setTaskFilter} />}
-                    {tab === 'Vendors' && <VendorsPage vendors={event.vendors} updateVendor={updateVendor} addVendor={addVendor} deleteVendor={(vendorId) => { if (user) setCloudSaved(false); setEvent((current) => ({ ...current, vendors: current.vendors.filter((vendor) => vendor.id !== vendorId) })) }} />}
+                    {tab === 'Timeline' && <TimelinePage event={event} tasks={event.tasks} updateTask={updateTask} deleteTask={(taskId) => { if (customer) setCloudSaved(false); setEvent((current) => ({ ...current, tasks: current.tasks.filter((task) => task.id !== taskId) })) }} addTask={addTask} newTask={newTask} setNewTask={setNewTask} filter={taskFilter} setFilter={setTaskFilter} />}
+                    {tab === 'Checklist' && <ChecklistPage event={event} tasks={event.tasks} progress={progress} updateTask={updateTask} deleteTask={(taskId) => { if (customer) setCloudSaved(false); setEvent((current) => ({ ...current, tasks: current.tasks.filter((task) => task.id !== taskId) })) }} addTask={addTask} newTask={newTask} setNewTask={setNewTask} filter={taskFilter} setFilter={setTaskFilter} />}
+                    {tab === 'Vendors' && <VendorsPage vendors={event.vendors} updateVendor={updateVendor} addVendor={addVendor} deleteVendor={(vendorId) => { if (customer) setCloudSaved(false); setEvent((current) => ({ ...current, vendors: current.vendors.filter((vendor) => vendor.id !== vendorId) })) }} />}
                     {tab === 'HappiXO Copilot' && <CopilotPage chat={chat} question={question} setQuestion={setQuestion} sendQuestion={sendQuestion} isChatLoading={isChatLoading} applySuggestion={applySuggestion} applyChange={applyChange} applySavingsProposal={applySavingsProposal} event={event} aiConfigured={aiConfigured} />}
                     {tab === 'What-if' && <Simulator event={event} simBudget={simBudget} setSimBudget={setSimBudget} simGuests={simGuests} setSimGuests={setSimGuests} simVenue={simVenue} setSimVenue={setSimVenue} simTheme={simTheme} setSimTheme={setSimTheme} simWeather={simWeather} setSimWeather={setSimWeather} simCost={simCost} onApplyScenario={applyScenario} />}
                     {tab === 'Theme studio' && <ThemeStudio event={event} onApply={(theme) => { updateEvent({ theme }); setToast(`${theme} applied to your plan.`) }} />}
@@ -1010,14 +951,13 @@ function App() {
             </main>
           </motion.div>
         )}
-      </AnimatePresence>}
-      {!isPrintingPlan && <AnimatePresence>{toast && <motion.div className="toast" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}><CheckCircle2 size={17} />{toast}<button onClick={() => setToast('')} aria-label="Dismiss notification"><X size={15} /></button></motion.div>}</AnimatePresence>}
-      {isPrintingPlan && <EventPlanPrintView event={event} planned={planned} accountSaved={Boolean(user)} />}
+      </AnimatePresence>
+      <AnimatePresence>{toast && <motion.div className={`toast${toastIsError ? ' toast-error' : ''}`} role={toastIsError ? 'alert' : 'status'} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>{toastIsError ? <AlertCircle size={17} /> : <CheckCircle2 size={17} />}{toast}<button onClick={() => setToast('')} aria-label="Dismiss notification"><X size={15} /></button></motion.div>}</AnimatePresence>
     </div>
   )
 }
 
-function EventsPage({ events, loading, loaded, error, saveError, profileName, profileEmail, profilePhone, localPlanAvailable, onRetry, onRetrySave, onCreate, onOpen, onDelete, onImport, onSignOut, onSaveProfile }: {
+function EventsPage({ events, loading, loaded, error, saveError, profileName, profileEmail, profilePhone, localPlanAvailable, onRetry, onRetrySave, onCreate, onOpen, onDelete, onImport, onEndSession, onSaveProfile }: {
   events: EventPlan[]
   loading: boolean
   loaded: boolean
@@ -1033,7 +973,7 @@ function EventsPage({ events, loading, loaded, error, saveError, profileName, pr
   onOpen: (event: EventPlan) => void
   onDelete: (event: EventPlan) => void
   onImport: () => void
-  onSignOut: () => void
+  onEndSession: () => void
   onSaveProfile: (fullName: string, phone: string) => Promise<void>
 }) {
   const [editingProfile, setEditingProfile] = useState(false)
@@ -1082,14 +1022,14 @@ function EventsPage({ events, loading, loaded, error, saveError, profileName, pr
   return <main className="my-events-page">
     <header className="my-events-header">
       <a className="brand" href="#" onClick={(event) => { event.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }) }}><span className="brand-mark"><Sparkles size={17} /></span> happi<span>xo</span></a>
-      <div className="my-events-account"><span>{profileName || 'Your HappiXO account'}</span><button className="text-button" onClick={openProfileEditor}>Edit profile</button><button className="text-button" onClick={onSignOut}>Sign out</button></div>
+      <div className="my-events-account"><span>{profileName || 'Your HappiXO details'}</span><button className="text-button" onClick={openProfileEditor}>Edit details</button><button className="text-button" onClick={onEndSession}>End session</button></div>
     </header>
     <section className="my-events-content">
       <PageHeading eyebrow="YOUR CELEBRATIONS, ALL IN ONE PLACE" title="My Events" subtitle="Your saved plans and recommendations, ready whenever you are." action={<button className="button button-dark" disabled={!loaded || loading} onClick={onCreate}><Plus size={16} /> Create an event</button>} />
-      {localPlanAvailable && <aside className="local-import-card"><div><b>Found an event plan saved in this browser</b><span>Import a copy into your account. The original browser copy will not be removed.</span></div><button className="button button-light button-small" disabled={!loaded || loading} onClick={onImport}>Import existing plan</button></aside>}
+      {localPlanAvailable && <aside className="local-import-card"><div><b>Found an event plan saved in this browser</b><span>Import a copy into this guest session. The original browser copy will not be removed.</span></div><button className="button button-light button-small" disabled={!loaded || loading} onClick={onImport}>Import existing plan</button></aside>}
       {error && <div className="cloud-error" role="alert"><div><b>We couldn’t load your saved events.</b><span>{error}</span></div><button className="button button-light button-small" onClick={onRetry}>Try again</button></div>}
       {saveError && <div className="cloud-error" role="alert"><div><b>Your new event was not saved.</b><span>{saveError}</span></div><button className="button button-light button-small" onClick={onRetrySave}>Try saving again</button></div>}
-      {error ? null : loading || !loaded ? <div className="events-loading" role="status"><Sparkles size={19} /> Loading your saved events…</div> : events.length === 0 ? <section className="my-events-section"><EmptyState icon={CalendarDays} title="No events created yet." text="Create an event plan and it will be saved to your account." /></section> : <>
+      {error ? null : loading || !loaded ? <div className="events-loading" role="status"><Sparkles size={19} /> Loading your saved events…</div> : events.length === 0 ? <section className="my-events-section"><EmptyState icon={CalendarDays} title="No events created yet." text="Create an event plan and it will be saved to your guest session." /></section> : <>
         <section className="my-events-section"><div className="my-events-section-heading"><div><h2>Upcoming events</h2><p>{upcoming.length} {upcoming.length === 1 ? 'celebration' : 'celebrations'} ahead</p></div></div>{upcoming.length ? <div className="my-events-grid">{upcoming.map(renderEvent)}</div> : <EmptyState icon={CalendarDays} title="No upcoming events" text="Your saved past celebrations remain below." />}</section>
         {past.length > 0 && <section className="my-events-section"><div className="my-events-section-heading"><div><h2>Past events</h2><p>Your completed celebrations remain saved.</p></div></div><div className="my-events-grid">{past.map(renderEvent)}</div></section>}
       </>}
@@ -1109,7 +1049,7 @@ function EventsPage({ events, loading, loaded, error, saveError, profileName, pr
   </main>
 }
 
-function Landing({ onStart, onDashboard, onAuth }: { onStart: (type?: Category) => void; onDashboard: () => void; onAuth: () => void }) {
+function Landing({ onStart, onDashboard, onDemo, customerActive, serviceError }: { onStart: (type?: Category) => void; onDashboard: () => void; onDemo: () => void; customerActive: boolean; serviceError: string }) {
   const [openingCategory, setOpeningCategory] = useState<Category | null>(null)
   const openingTimer = useRef<number | undefined>(undefined)
   const openInvitation = (category: Category = 'Wedding') => {
@@ -1128,9 +1068,9 @@ function Landing({ onStart, onDashboard, onAuth }: { onStart: (type?: Category) 
       <header className="landing-nav">
         <a className="brand" href="#" onClick={(e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }) }}><span className="brand-mark"><Sparkles size={17} /></span> happi<span>xo</span></a>
         <nav className="landing-links"><a href="#how-it-works">How it works</a><a href="#celebrations">Celebrations</a><a href="#features">Features</a></nav>
-        <div className="landing-actions"><button className="text-button" onClick={onAuth}>Sign in</button><button className="text-button" onClick={onDashboard}>{isSupabaseConfigured ? 'My Events' : 'Open demo'}</button><button className="button button-dark button-small" disabled={openingCategory !== null} onClick={() => openInvitation()}>Start planning <ArrowRight size={15} /></button></div>
+        <div className="landing-actions"><button className="text-button" onClick={onDashboard}>{customerActive ? 'My Events' : 'Your details'}</button>{!customerActive && <button className="text-button" onClick={onDemo}>Open demo</button>}<button className="button button-dark button-small" disabled={openingCategory !== null} onClick={() => openInvitation()}>Start planning <ArrowRight size={15} /></button></div>
       </header>
-      {!supabase && <aside className="database-setup-notice" role="status"><b>Account storage is unavailable</b><span>{supabaseConfigurationError} Plans created in this browser demo will not appear in Supabase.</span></aside>}
+      {serviceError && <aside className="database-setup-notice" role="alert"><b>Guest planning service is unavailable</b><span>{serviceError} Browser demo plans will not be saved to Supabase.</span></aside>}
       <main>
         <section className="hero-section cinematic-hero">
           <CinematicVideo video="/videos/celebration.mp4" poster="/videos/celebration.jpg" className="hero-scene" />
@@ -1197,13 +1137,13 @@ function Landing({ onStart, onDashboard, onAuth }: { onStart: (type?: Category) 
           <div className="feature-list"><Feature icon={Sparkles} title="A plan that starts with you" text="Share your kind of celebration, your budget and the little details. Get a thoughtful first draft—not a one-size-fits-all checklist." number="01" /><Feature icon={Wallet} title="A budget with breathing room" text="See where every rupee is going. Adjust your numbers as you go, with real totals that update right away." number="02" /><Feature icon={CalendarDays} title="A timeline that keeps its promises" text="Turn a big to-do into small, timely steps. Your checklist moves with your event date, not the other way around." number="03" /><Feature icon={Users} title="A little help with the details" text="Keep vendor categories, guest needs and thoughtful touches close by, all in one calm workspace." number="04" /></div>
         </section>
         <section className="preview-section" id="how-it-works">
-          <div className="preview-copy"><div className="eyebrow">A SNEAK PEEK AT THE PLAN</div><h2>One lovely place<br />to <em>see it all.</em></h2><p>From the first idea to the final toast, your plan stays clear, flexible and very much yours.</p><button className="button button-dark" onClick={onDashboard}>Explore the sample plan <ArrowRight size={16} /></button></div>
+          <div className="preview-copy"><div className="eyebrow">A SNEAK PEEK AT THE PLAN</div><h2>One lovely place<br />to <em>see it all.</em></h2><p>From the first idea to the final toast, your plan stays clear, flexible and very much yours.</p><button className="button button-dark" onClick={onDemo}>Explore the sample plan <ArrowRight size={16} /></button></div>
           <div className="preview-card"><div className="preview-top"><div><small>YOUR CELEBRATION</small><h3>Aarav & Mira’s Celebration</h3><span><MapPin size={13} /> Jaipur <i /> <CalendarDays size={13} /> 12 Dec, 2026</span></div><span className="preview-badge"><Sparkles size={13} /> YOUR PLAN</span></div><div className="preview-stats"><div><small>PLANNED BUDGET</small><b>₹8,50,000</b><span><span className="mini-check">✓</span> Thoughtfully allocated</span></div><div><small>GUESTS TO CELEBRATE WITH</small><b>120</b><span>Good things are gathering</span></div><div><small>PLANNING PROGRESS</small><b>17%</b><span>One step at a time</span></div></div><div className="preview-bottom"><div className="preview-donut"><svg viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" /><circle className="donut-fill" cx="25" cy="25" r="20" /></svg><span>6<small>steps</small></span></div><div className="preview-next"><small>UP NEXT</small><b>Shortlist and book your venue</b><span><CalendarDays size={13} /> Coming up in your timeline</span></div><ArrowRight size={17} /></div><div className="preview-spark">✳</div></div>
         </section>
         <section className="testimonial-section"><div className="eyebrow">KIND WORDS, IMAGINED MOMENTS</div><h2>A calmer kind of <em>celebration.</em></h2><p className="sample-caption">Illustrative stories from the kinds of celebrations we love helping with.</p><div className="quote-grid"><Quote quote="We finally had one place for the budget, the checklist and all the little ideas. It made the whole thing feel possible." name="Riya & Dev" context="Planning an intimate wedding" tone="lavender" /><Quote quote="The timeline helped our college team go from a group chat to a real, run-of-show plan. No more last-minute chaos." name="Ananya" context="Campus fest coordinator" tone="peach" /><Quote quote="We could talk through options before changing anything. That breathing room was exactly what I needed." name="Meera" context="Hosting a family milestone" tone="sage" /></div></section>
         <CinematicStorySection className="story-finale" video="/videos/finale.mp4" poster="/videos/finale.jpg" eyebrow="YOUR NEXT FAVOURITE MEMORY STARTS HERE" title="Your Next Unforgettable Moment Starts Here." description="The best celebrations start with a single idea. Let’s make yours a beautiful one." buttonLabel="Create My Event" category="Wedding" onPlan={openInvitation} />
       </main>
-      <footer className="landing-footer"><a className="brand" href="#" onClick={(e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }) }}><span className="brand-mark"><Sparkles size={16} /></span> happi<span>xo</span></a><span>Made for the moments that matter.</span><div><a href="#features">How it works</a><a href="#celebrations">Celebrations</a><button onClick={onDashboard}>Open demo plan</button></div><small>© 2026 HappiXO · Thoughtfully planned, locally saved.</small></footer>
+      <footer className="landing-footer"><a className="brand" href="#" onClick={(e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }) }}><span className="brand-mark"><Sparkles size={16} /></span> happi<span>xo</span></a><span>Made for the moments that matter.</span><div><a href="#features">How it works</a><a href="#celebrations">Celebrations</a><button onClick={onDemo}>Open demo plan</button></div><small>© 2026 HappiXO · Thoughtfully planned, locally saved.</small></footer>
     </div>
   )
 }
@@ -1266,9 +1206,9 @@ function CinematicVideo({ video, poster, className, style }: { video: string; po
       return
     }
     let active = true
-    void element.play().catch((error: unknown) => {
+    void element.play().catch(() => {
       if (!active || element.paused) return
-      console.info(`HappiXO is showing the poster because ${video} could not play.`, error)
+      console.info(`HappiXO is showing the poster because ${video} could not play.`)
       setVideoFailed(true)
     })
     return () => {
@@ -1346,7 +1286,7 @@ function Quote({ quote, name, context, tone }: { quote: string; name: string; co
   return <article className={`quote-card tone-${tone}`}><span className="quote-mark">“</span><p>{quote}</p><div className="quote-person"><span>{name.slice(0, 1)}</span><div><b>{name}</b><small>{context}</small></div></div></article>
 }
 
-function EventPlanPrintView({ event, planned, accountSaved }: { event: EventPlan; planned: number; accountSaved: boolean }) {
+export function EventPlanPrintView({ event, planned, accountSaved }: { event: EventPlan; planned: number; accountSaved: boolean }) {
   const generated = event.generatedPlan
   const themeDescription = generated?.theme.description ?? themeOptions.find((theme) => theme.name === event.theme)?.desc
   return <article className="print-plan">
@@ -1357,7 +1297,7 @@ function EventPlanPrintView({ event, planned, accountSaved }: { event: EventPlan
     <section><h2>Preparation timeline</h2>{event.tasks.length ? <ol>{[...event.tasks].sort((a, b) => a.dueDate.localeCompare(b.dueDate)).map((task) => <li key={task.id}><b>{task.name}</b> · {dateLabel(task.dueDate)} · {task.status}<br />{task.description}</li>)}</ol> : <p>No timeline tasks yet.</p>}</section>
     <section><h2>Vendor checklist</h2>{event.vendors.length ? <table><thead><tr><th>Category</th><th>Estimate</th><th>Status</th><th>Contact & notes</th></tr></thead><tbody>{event.vendors.map((vendor) => <tr key={vendor.id}><td>{vendor.category}</td><td>{formatINR(vendor.estimatedCost)}</td><td>{vendor.status}</td><td>{[vendor.contact, vendor.notes].filter(Boolean).join(' — ') || 'To be added'}</td></tr>)}</tbody></table> : <p>No vendors on the checklist yet.</p>}</section>
     <section><h2>Important planning notes</h2><p>{event.requirements || 'No additional notes.'}</p>{generated?.savingTips.length ? <><h3>Budget tips</h3><ul>{generated.savingTips.map((tip, index) => <li key={`tip-${index}`}>{tip}</li>)}</ul></> : null}{generated?.contingencyPlan.length ? <><h3>Contingency ideas</h3><ul>{generated.contingencyPlan.map((tip, index) => <li key={`contingency-${index}`}>{tip}</li>)}</ul></> : null}</section>
-    <footer>{generated ? 'HappiXO-generated planning suggestions and all costs are estimates; verify details directly with local vendors.' : 'Locally generated demo plan. Estimates are illustrative, not vendor quotes.'} · {accountSaved ? 'Saved to your HappiXO account.' : 'Saved in this browser.'}</footer>
+    <footer>{generated ? 'HappiXO-generated planning suggestions and all costs are estimates; verify details directly with local vendors.' : 'Locally generated demo plan. Estimates are illustrative, not vendor quotes.'} · {accountSaved ? 'Saved to your private guest session.' : 'Saved in this browser demo.'}</footer>
   </article>
 }
 
@@ -1367,8 +1307,8 @@ function Wizard({ data, setData, step, setStep, naturalText, setNaturalText, acc
 }) {
   const update = (patch: Partial<WizardData>) => setData({ ...data, ...patch })
   const stepTitles = ['The big idea', 'The practical bits', 'The little details']
-  return <div className="wizard-page"><header className="wizard-nav"><a className="brand" href="#" onClick={(e) => { e.preventDefault(); onBack() }}><span className="brand-mark"><Sparkles size={17} /></span> happi<span>xo</span></a><div className="wizard-save"><span className="demo-pill"><span /> {accountSaved ? 'Account planning' : 'Demo mode'}</span><span>{accountSaved ? 'Saved to your account after planning' : 'Private to this browser'}</span></div><button className="icon-button" aria-label="Close wizard" onClick={onBack}><X size={19} /></button></header>
-    <main className="wizard-main"><aside className="wizard-aside"><div className="eyebrow">A GOOD THING IS TAKING SHAPE</div><h1>Let’s make room<br />for <em>something lovely.</em></h1><p>A few little details help us make your first plan feel like it was made just for you.</p><div className="wizard-steps">{stepTitles.map((title, index) => <button key={title} className={`wizard-step ${index === step ? 'current' : ''} ${index < step ? 'complete' : ''}`} onClick={() => index < step && setStep(index)}><span>{index < step ? <Check size={14} /> : `0${index + 1}`}</span><div><b>{title}</b><small>{['Set the scene', 'Make it real', 'Make it yours'][index]}</small></div></button>)}</div><div className="wizard-aside-note"><Sparkles size={16} /><span>{accountSaved ? 'Your plan will be saved to your HappiXO account.' : 'Your plan stays right here, in your browser.'}</span></div></aside>
+  return <div className="wizard-page"><header className="wizard-nav"><a className="brand" href="#" onClick={(e) => { e.preventDefault(); onBack() }}><span className="brand-mark"><Sparkles size={17} /></span> happi<span>xo</span></a><div className="wizard-save"><span className="demo-pill"><span /> {accountSaved ? 'Guest planning' : 'Demo mode'}</span><span>{accountSaved ? 'Saved to this browser session after planning' : 'Private to this browser'}</span></div><button className="icon-button" aria-label="Close wizard" onClick={onBack}><X size={19} /></button></header>
+    <main className="wizard-main"><aside className="wizard-aside"><div className="eyebrow">A GOOD THING IS TAKING SHAPE</div><h1>Let’s make room<br />for <em>something lovely.</em></h1><p>A few little details help us make your first plan feel like it was made just for you.</p><div className="wizard-steps">{stepTitles.map((title, index) => <button key={title} className={`wizard-step ${index === step ? 'current' : ''} ${index < step ? 'complete' : ''}`} onClick={() => index < step && setStep(index)}><span>{index < step ? <Check size={14} /> : `0${index + 1}`}</span><div><b>{title}</b><small>{['Set the scene', 'Make it real', 'Make it yours'][index]}</small></div></button>)}</div><div className="wizard-aside-note"><Sparkles size={16} /><span>{accountSaved ? 'Your plan will be saved to your private guest session.' : 'Your plan stays right here, in your browser.'}</span></div></aside>
     <section className="wizard-form-card"><div className="form-progress"><span>STEP 0{step + 1} <i /> 03</span><div><i style={{ width: `${(step + 1) / 3 * 100}%` }} /></div></div><AnimatePresence mode="wait"><motion.div key={step} initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -8 }} transition={{ duration: .16 }}>
       {step === 0 && <div className="wizard-step-content"><div className="eyebrow">FIRST, THE REASON TO GATHER</div><h2>What are we celebrating?</h2><p className="form-subtitle">Every great plan starts with a name and a date.</p><label className="field-label">What kind of event? <span>Choose one</span></label><div className="type-pills">{categoryCards.map((item) => <button key={item.name} className={data.type === item.name ? 'selected' : ''} onClick={() => update({ type: item.name })}><item.icon size={15} />{item.name === 'Community gathering' ? 'Community Event' : item.name}</button>)}</div><label className="field-label" htmlFor="event-name">Give your event a name</label><input id="event-name" className="input-field" placeholder="e.g. Aisha’s 30th, The big reunion…" value={data.name} onChange={(e) => update({ name: e.target.value })} maxLength={72} /><label className="field-label" htmlFor="event-date">When’s the big day?</label><div className="input-icon-wrap"><CalendarDays size={17} /><input id="event-date" className="input-field" type="date" min={TODAY_DATE} value={data.date} onChange={(e) => update({ date: e.target.value })} /></div></div>}
       {step === 1 && <div className="wizard-step-content"><div className="eyebrow">LET’S MAKE IT REAL</div><h2>Where, and for whom?</h2><p className="form-subtitle">A few practical details help keep your plan grounded.</p><label className="field-label" htmlFor="event-city">City or location</label><div className="input-icon-wrap"><MapPin size={17} /><input id="event-city" className="input-field" placeholder="e.g. Jaipur, Rajasthan" value={data.city} onChange={(e) => update({ city: e.target.value })} /></div><div className="field-grid"><div><label className="field-label" htmlFor="event-budget">Your budget <span>INR</span></label><div className="input-icon-wrap"><IndianRupee size={16} /><input id="event-budget" className="input-field" type="number" min="10000" max={MAX_EVENT_BUDGET} step="5000" value={data.budget} onChange={(e) => update({ budget: Number(e.target.value) })} /></div></div><div><label className="field-label" htmlFor="event-guests">Expected guests</label><div className="input-icon-wrap"><Users size={16} /><input id="event-guests" className="input-field" type="number" min="1" max={MAX_EVENT_GUESTS} value={data.guests} onChange={(e) => update({ guests: Number(e.target.value) })} /></div></div></div><div className="budget-hint"><Lightbulb size={15} /> No pressure to get it perfect. Your budget can change anytime.</div></div>}
@@ -1422,7 +1362,7 @@ function Overview({ event, planned, spent, remaining, utilization, progress, upc
       <section className="panel upcoming-panel"><div className="panel-heading"><div><h2>Coming up next</h2><p>Small steps, beautifully timed.</p></div><button className="icon-button subtle" onClick={() => onGo('Timeline')} aria-label="Open timeline"><ArrowUpRight size={17} /></button></div>{upcoming.length ? <div className="upcoming-list">{upcoming.map((task, index) => <div className="upcoming-item" key={task.id}><div className={`upcoming-marker marker-${index}`}><CalendarDays size={14} /></div><div className="upcoming-info"><b>{task.name}</b><small>{task.dueDate < TODAY_DATE ? 'Overdue' : `Due ${dateLabel(task.dueDate, { day: 'numeric', month: 'short' })}`}</small></div><span className={`priority-dot priority-${task.priority.toLowerCase()}`} title={`${task.priority} priority`} /></div>)}</div> : <EmptyState icon={CheckCircle2} title="All caught up" text="Add a task to keep your plan moving." />}<button className="button button-light full-button" onClick={() => onGo('Timeline')}>Open your timeline <ArrowRight size={15} /></button></section></div>
     <div className="overview-lower"><section className="theme-card"><div className="theme-art"><div className="theme-art-orb orb1" /><div className="theme-art-orb orb2" /><div className="theme-leaf">✳</div><div className="theme-palettes">{(event.generatedPlan?.theme.colors ?? themeOptions[0].colors).slice(0, 4).map((color) => <i key={color} style={{ background: color }} />)}</div></div><div className="theme-card-copy"><div className="eyebrow">THE FEEL OF THE DAY</div><h3>{event.theme || 'Your celebration, your style'}</h3><p>{event.generatedPlan?.theme.description ?? themeOptions.find((option) => option.name === event.theme)?.desc ?? 'A thoughtful direction for the little details that make your event feel like you.'}</p><button className="link-button" onClick={() => onGo('Theme studio')}>Explore the theme studio <ArrowRight size={14} /></button></div></section><section className="panel concept-card"><div className="concept-icon"><Sparkles size={17} /></div><div className="eyebrow">YOUR EVENT CONCEPT <span className="demo-inline">· {event.generatedPlan ? 'GEMINI' : 'LOCAL DEMO'}</span></div><p>{event.concept}</p><div className="concept-chips"><span><Users size={12} /> {event.guests} guests</span><span><CloudSun size={12} /> {event.venue}</span><span><Heart size={12} /> {event.food}</span></div></section></div>
     {event.generatedPlan && <GeneratedPlanDetails plan={event.generatedPlan} />}
-    <div className="sample-disclaimer"><Sparkles size={14} /> {event.generatedPlan ? 'HappiXO-generated suggestions and costs are estimates only, not vendor quotes or bookings.' : 'This is a deterministic demo plan generated locally—not a live HappiXO response.'} {accountSaved ? 'Your edits save to your account.' : 'Your edits save in this browser.'}</div>
+    <div className="sample-disclaimer"><Sparkles size={14} /> {event.generatedPlan ? 'HappiXO-generated suggestions and costs are estimates only, not vendor quotes or bookings.' : 'This is a deterministic demo plan generated locally—not a live HappiXO response.'} {accountSaved ? 'Your edits save to your private guest session.' : 'Your edits save in this browser demo.'}</div>
     {editingDetails && <div className="event-edit-backdrop" onMouseDown={(mouseEvent) => { if (mouseEvent.target === mouseEvent.currentTarget) setEditingDetails(false) }}>
       <section className="event-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="event-edit-title">
         <div className="event-edit-heading"><div><div className="eyebrow">KEEP YOUR PLAN UP TO DATE</div><h2 id="event-edit-title">Edit event details</h2></div><button className="icon-button" type="button" aria-label="Close editor" onClick={() => setEditingDetails(false)}><X size={18} /></button></div>
