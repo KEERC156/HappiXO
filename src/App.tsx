@@ -320,7 +320,8 @@ function App() {
   const [mobileNav, setMobileNav] = useState(false)
   const [toast, setToast] = useState('')
   const [isDownloadingPlan, setIsDownloadingPlan] = useState(false)
-  const toastIsError = toast.startsWith('Could not download') || toast.startsWith('Your saved event could not be verified') || toast.startsWith('Wait until your event')
+  const generationInFlight = useRef(false)
+  const toastIsError = toast.startsWith('Could not download') || toast.startsWith('Could not save your event') || toast.startsWith('Could not create your plan') || toast.startsWith('Your saved event could not be verified') || toast.startsWith('Wait until your event')
   const [aiConfigured, setAIConfigured] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isChatLoading, setIsChatLoading] = useState(false)
@@ -519,6 +520,12 @@ function App() {
     if (typeof normalizedUpdate.theme === 'string') setSimTheme(normalizedUpdate.theme)
     setEvent((current) => ({ ...current, ...normalizedUpdate }))
   }
+  const retryCloudSave = () => {
+    if (!customer || cloudSaving) return
+    setCloudSaveError('')
+    setCloudSaved(false)
+    setEvent((current) => ({ ...current }))
+  }
   const saveEventDetails = (details: EventDetailsDraft) => {
     updateEvent(details)
     setToast(customer ? 'Event details updated. Saving to your guest session…' : 'Event details updated in browser demo.')
@@ -639,63 +646,72 @@ function App() {
     }
   }
   const generatePlan = async () => {
-    const data = { ...wizard }
-    if (naturalText.trim()) {
-      const text = naturalText.trim()
-      data.requirements = [data.requirements, `Additional event description: ${text}`].filter(Boolean).join('\n')
-      const guestMatch = text.match(/(\d{1,4})\s*(?:guests?|people|friends)/i)
-      const budgetMatch = text.match(/(?:₹|rs\.?\s*|budget(?:\s+of)?\s*)([\d,]+(?:\.\d+)?)\s*(lakh|lacs?|k|thousand)?/i)
-      if (guestMatch) data.guests = Math.min(MAX_EVENT_GUESTS, Number(guestMatch[1]))
-      if (budgetMatch) {
-        const base = Number(budgetMatch[1].replaceAll(',', ''))
-        const unit = budgetMatch[2]?.toLowerCase()
-        const multiplier = unit === 'lakh' || unit === 'lac' || unit === 'lacs' ? 100000 : unit === 'k' || unit === 'thousand' ? 1000 : 1
-        const parsedBudget = Math.round(base * multiplier)
-        if (parsedBudget >= 10000 && parsedBudget <= MAX_EVENT_BUDGET) data.budget = parsedBudget
-        else if (parsedBudget > MAX_EVENT_BUDGET) setToast('That budget is above the demo planning limit. Keeping your form budget instead.')
-      }
-      if (!data.name) data.name = text.length > 42 ? `${data.type} celebration` : text
-    }
+    if (generationInFlight.current) return
+    generationInFlight.current = true
     setIsGenerating(true)
-    let configured = aiConfigured
-    if (!configured) {
-      try {
-        configured = (await getAIStatus()).configured
-        setAIConfigured(configured)
-      } catch {
-        configured = false
+    try {
+      const data = { ...wizard }
+      if (naturalText.trim()) {
+        const text = naturalText.trim()
+        data.requirements = [data.requirements, `Additional event description: ${text}`].filter(Boolean).join('\n')
+        const guestMatch = text.match(/(\d{1,4})\s*(?:guests?|people|friends)/i)
+        const budgetMatch = text.match(/(?:₹|rs\.?\s*|budget(?:\s+of)?\s*)([\d,]+(?:\.\d+)?)\s*(lakh|lacs?|k|thousand)?/i)
+        if (guestMatch) data.guests = Math.min(MAX_EVENT_GUESTS, Number(guestMatch[1]))
+        if (budgetMatch) {
+          const base = Number(budgetMatch[1].replaceAll(',', ''))
+          const unit = budgetMatch[2]?.toLowerCase()
+          const multiplier = unit === 'lakh' || unit === 'lac' || unit === 'lacs' ? 100000 : unit === 'k' || unit === 'thousand' ? 1000 : 1
+          const parsedBudget = Math.round(base * multiplier)
+          if (parsedBudget >= 10000 && parsedBudget <= MAX_EVENT_BUDGET) data.budget = parsedBudget
+          else if (parsedBudget > MAX_EVENT_BUDGET) setToast('That budget is above the demo planning limit. Keeping your form budget instead.')
+        }
+        if (!data.name) data.name = text.length > 42 ? `${data.type} celebration` : text
       }
-    }
-    if (configured) {
-      try {
-        const generated = await generateAIPlan(data as EventInput)
-        const generatedEvent = normalizeEventIds(toGeneratedEvent(data, generated))
-        setGuestData(Boolean(customer))
-        if (customer) setCloudSaved(false)
-        setEvent(generatedEvent)
-        setSimBudget(data.budget); setSimGuests(data.guests); setSimVenue(data.venue); setSimTheme(generated.theme.name); setSimWeather(false)
-        setTab('Overview')
-        setPage('dashboard')
-        setToast(customer ? 'Your Gemini plan is ready. Saving it to your guest session…' : 'Your Gemini plan is ready in browser demo mode.')
-        setIsGenerating(false)
-        return
-      } catch (error) {
-        console.error('Gemini plan generation failed; using the local demo planner.')
-        setAIConfigured(false)
-        setToast(error instanceof Error ? `${error.message} A local demo plan is ready instead.` : 'Gemini is unavailable. A local demo plan is ready instead.')
+      let configured = aiConfigured
+      if (!configured) {
+        try {
+          configured = (await getAIStatus()).configured
+          setAIConfigured(configured)
+        } catch {
+          configured = false
+        }
       }
-    } else {
-      setToast('Gemini is not configured. Your plan is generated locally in demo mode.')
+      let fallbackReason = configured ? '' : 'Gemini is unavailable, so a local plan is ready instead.'
+      if (configured) {
+        try {
+          const generated = await generateAIPlan(data as EventInput)
+          const generatedEvent = normalizeEventIds(toGeneratedEvent(data, generated))
+          setGuestData(Boolean(customer))
+          if (customer) setCloudSaved(false)
+          setEvent(generatedEvent)
+          setSimBudget(data.budget); setSimGuests(data.guests); setSimVenue(data.venue); setSimTheme(generated.theme.name); setSimWeather(false)
+          setTab('Overview')
+          setPage('dashboard')
+          setToast(customer ? 'Your Gemini plan is ready. Saving it to your guest session…' : 'Your Gemini plan is ready in browser demo mode.')
+          return
+        } catch {
+          console.error('Gemini plan generation failed; using the local demo planner.')
+          setAIConfigured(false)
+          fallbackReason = 'Gemini could not complete the request, so a local plan is ready instead.'
+        }
+      }
+      const localEvent = normalizeEventIds(makeEvent(data))
+      setGuestData(Boolean(customer))
+      if (customer) setCloudSaved(false)
+      setEvent(localEvent)
+      setSimBudget(data.budget); setSimGuests(data.guests); setSimVenue(data.venue); setSimTheme(data.theme); setSimWeather(false)
+      setTab('Overview')
+      setPage('dashboard')
+      setToast(customer
+        ? `${fallbackReason} Saving it to your guest session…`
+        : `${fallbackReason} This plan is browser demo data and is not saved to Supabase.`)
+    } catch (error) {
+      console.error('Event planning failed before the dashboard opened.')
+      setToast(error instanceof Error ? `Could not create your plan: ${error.message}` : 'Could not create your plan. Please try again.')
+    } finally {
+      generationInFlight.current = false
+      setIsGenerating(false)
     }
-    const localEvent = normalizeEventIds(makeEvent(data))
-    setGuestData(Boolean(customer))
-    if (customer) setCloudSaved(false)
-    setEvent(localEvent)
-    setSimBudget(data.budget); setSimGuests(data.guests); setSimVenue(data.venue); setSimTheme(data.theme); setSimWeather(false)
-    setTab('Overview')
-    setPage('dashboard')
-    setToast(customer ? 'Your event plan is ready. Saving it to your guest session…' : 'This plan is browser demo data and is not saved to Supabase.')
-    setIsGenerating(false)
   }
   const nextWizard = () => {
     if (step === 0 && (!wizard.name.trim() || !wizard.date || wizard.date < TODAY_DATE)) { setToast('Add an event name and a date today or later to continue.'); return }
@@ -903,9 +919,7 @@ function App() {
                 setCloudReload((current) => current + 1)
               }}
               onRetrySave={() => {
-                setCloudSaveError('')
-                setCloudSaved(false)
-                setEvent((current) => ({ ...current }))
+                retryCloudSave()
               }} onCreate={() => startWizard()}
               onOpen={openSavedEvent} onDelete={removeSavedEvent} onImport={importLocalEvent} onEndSession={endSession} onSaveProfile={saveProfile}
             />
@@ -935,6 +949,7 @@ function App() {
                 <div className="topbar-actions"><span className="demo-pill" title={cloudSaveError || undefined}><span /> {customer ? cloudSaving ? 'Saving…' : cloudSaveError ? cloudSaveError.startsWith('Saved,') ? 'Saved · refresh needed' : 'Save failed' : cloudSaved ? 'Saved to guest session' : 'Not saved yet' : aiConfigured ? 'Gemini · browser demo' : 'Demo · browser only'}</span>{customer && <button className="topbar-link" onClick={() => setPage('events')}>My Events</button>}<button className="button button-light button-small export-plan-button" disabled={isDownloadingPlan} onClick={() => void downloadEventPlan()}><Download size={14} /> {isDownloadingPlan ? 'Preparing PDF…' : 'Download Event Plan'}</button><button className="topbar-link" onClick={() => setPage('landing')}>Home <OpenIcon size={14} /></button></div>
               </header>
               <div className="dashboard-content">
+                {customer && cloudSaveError && <div className="cloud-error dashboard-save-error" role="alert"><div><b>{cloudSaveError.startsWith('Saved,') ? 'Your event was saved, but the event list could not refresh.' : 'Your event plan was not saved.'}</b><span>{cloudSaveError}</span></div><button className="button button-light button-small" disabled={cloudSaving} onClick={retryCloudSave}>{cloudSaving ? 'Retrying…' : 'Try saving again'}</button></div>}
                 <AnimatePresence mode="wait">
                   <motion.section key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: .18 }}>
                     {tab === 'Overview' && <Overview event={event} planned={planned} spent={spent} remaining={remaining} utilization={utilization} progress={progress} upcoming={upcoming} chartData={chartData} accountSaved={Boolean(customer)} onGo={setTab} onSaveDetails={saveEventDetails} />}

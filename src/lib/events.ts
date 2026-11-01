@@ -1,20 +1,36 @@
 import type { EventPlan } from '../types'
 
+const EVENT_REQUEST_TIMEOUT_MS = 20_000
+
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
-  const response = await fetch(path, {
-    method,
-    credentials: 'same-origin',
-    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  const payload: unknown = await response.json().catch(() => null)
-  if (!response.ok) {
-    const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
-      ? payload.error
-      : `HappiXO event service failed (${response.status}).`
-    throw new Error(message)
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), EVENT_REQUEST_TIMEOUT_MS)
+  try {
+    const response = await fetch(path, {
+      method,
+      credentials: 'same-origin',
+      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    })
+    const payload: unknown = await response.json().catch(() => null)
+    if (!response.ok) {
+      const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
+        ? payload.error
+        : `HappiXO event service failed (${response.status}).`
+      throw new Error(message)
+    }
+    return payload as T
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(method === 'POST'
+        ? 'Saving your event timed out. Your event details are still here; please retry.'
+        : 'HappiXO event request timed out. Please retry.')
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
   }
-  return payload as T
 }
 
 function ensureUuid(value: string) {

@@ -45,26 +45,49 @@ export type ChatResponse = {
   suggestedChanges: ProposedChange[]
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const payload: unknown = await response.json().catch(() => null)
-  if (!response.ok) {
-    const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
-      ? payload.error
-      : `HappiXO service request failed (${response.status}).`
-    throw new Error(message)
+const AI_PLAN_TIMEOUT_MS = 45_000
+const AI_STATUS_TIMEOUT_MS = 8_000
+
+async function withTimeout<T>(request: (signal: AbortSignal) => Promise<T>, timeoutMs: number): Promise<T> {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await request(controller.signal)
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`HappiXO request timed out after ${Math.round(timeoutMs / 1000)} seconds.`)
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
   }
-  return payload as T
+}
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  return withTimeout(async (signal) => {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    })
+    const payload: unknown = await response.json().catch(() => null)
+    if (!response.ok) {
+      const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
+        ? payload.error
+        : `HappiXO service request failed (${response.status}).`
+      throw new Error(message)
+    }
+    return payload as T
+  }, AI_PLAN_TIMEOUT_MS)
 }
 
 export async function getAIStatus(): Promise<{ configured: boolean; model?: string }> {
-  const response = await fetch('/api/ai/status')
-  if (!response.ok) throw new Error('HappiXO service status is unavailable.')
-  return response.json() as Promise<{ configured: boolean; model?: string }>
+  return withTimeout(async (signal) => {
+    const response = await fetch('/api/ai/status', { signal })
+    if (!response.ok) throw new Error('HappiXO service status is unavailable.')
+    return response.json() as Promise<{ configured: boolean; model?: string }>
+  }, AI_STATUS_TIMEOUT_MS)
 }
 
 export function generateAIPlan(event: EventInput): Promise<GeneratedPlan> {

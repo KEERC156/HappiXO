@@ -298,7 +298,10 @@ function normalizePlanCosts(plan, availableBudget, event) {
 
 function modelClient() {
   if (!process.env.GEMINI_API_KEY?.trim()) return null
-  return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY.trim() })
+  return new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY.trim(),
+    httpOptions: { timeout: 40_000 },
+  })
 }
 
 function getDatabaseClient() {
