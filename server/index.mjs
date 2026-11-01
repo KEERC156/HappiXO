@@ -129,6 +129,7 @@ const guestPlanSchema = z.object({
   tasks: z.array(guestTaskSchema).max(64),
   vendors: z.array(guestVendorSchema).max(64),
   concept: z.string().max(1200),
+  created: z.string().datetime().optional(),
   generatedPlan: generatedPlanSchema.optional(),
 }).strict()
 
